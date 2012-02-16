@@ -339,7 +339,7 @@ function template_preprocess_islandora_fjm_atomentry(&$vars) {
 */
 function _fjm_ceacs_convert_entities($string) {
   return preg_replace_callback('/&([a-zA-Z][a-zA-Z0-9]+);/',
-                               '_islandora_fjm_convert_entity', $string);
+                               '_fjm_ceacs_convert_entity', $string);
 }
 
 /* Swap HTML named entity with its numeric equivalent. If the entity
@@ -612,7 +612,7 @@ function fjm_ceacs_preprocess_islandora_fjm_atomentry(&$vars) {
   //Take a Solr query, and call theme on each doc returned.
   $doc =& $vars['solr_doc'];
   $style = citeproc_style($vars['style']);
-  $vars['content'] = _islandora_fjm_convert_entities(scholar_citation_from_solr_doc($doc, $style === FALSE? 
+  $vars['content'] = _fjm_ceacs_convert_entities(scholar_citation_from_solr_doc($doc, $style === FALSE? 
       variable_get('islandora_fjm_recent_additions_csl', NULL):
       $style,
     'mods_fullxml_store',
