@@ -1,0 +1,844 @@
+<?php
+
+function fjm_ceacs_menu() {
+  return array( 
+    'authors' => array(
+      'title' => 'All Authors',
+      'page callback' => 'theme',
+      'page arguments' => array('fjm_ceacs_authors', 'all', 1),
+      'type' => MENU_NORMAL_PAGE,
+      'access arguments' => array('access content')
+    ),
+    'members' => array(
+      'title' => 'CEACS Members',
+      'page callback' => 'theme',
+      'page arguments' => array('fjm_ceacs_authors', 'ceacs', 1),
+      'type' => MENU_NORMAL_PAGE,
+      'access arguments' => array('access content')
+    ),
+    'islandora/atomfeed' => array(
+      'title' => 'ATOM Feed',
+      'page callback' => 'fjm_ceacs_atomfeed',
+      'type' => MENU_CALLBACK,
+      'access arguments' => array('access content')
+    )
+  );
+}
+
+function fjm_ceacs_atomfeed($query = '*:*', $number=10, $csl=NULL, $sort='mods_dateIssued_dt desc') {
+  return theme('islandora_fjm_atomfeed', $query, $number, $csl, $sort);
+}
+
+function fjm_ceacs_theme() {
+  return array(
+    'islandora_fjm_atomfeed' => array(
+      'arguments' => array(
+        'query' => '*:*',
+        'number' => 10,
+        'style' => NULL,
+        'sort' => 'mods_dateIssued_dt desc'
+      ),
+      'template' => 'templates/islandora-fjm-atomfeed'
+    ),
+    'islandora_fjm_atomentry' => array(
+      'arguments' => array(
+        'solr_doc' => NULL,
+        'style' => NULL
+      ),
+      'template' => 'templates/islandora-fjm-atomentry'
+    ),
+    'fjm_ceacs_recent_ir_list' => array(
+      'arguments' => array(
+        'solr_docs' => array(),
+      ),
+      'template' => 'templates/fjm-ceacs-ir-recent-list'
+    ),
+    'fjm_ceacs_recent_ir_item' => array(
+      'arguments' => array(
+        'solr_doc' => NULL,
+        'style' => NULL,
+        'type' => NULL,
+        'access' => NULL,
+        'citation' => NULL,
+      ),
+      'template' => 'templates/fjm-ceacs-ir-recent-item'
+    ),
+    'fjm_ceacs_authors' => array(
+      'arguments' => array(
+        'type' => 'all',
+        'letter' => NULL
+      ),
+    ),
+    'fjm_ceacs_az' => array(),
+    'table_improved' => array(
+      'arguments' => array(
+        'headers' => array(),
+        'body' => array(),
+        'footers' => array(),
+        'caption' => NULL,
+        'attributes' => array()
+      )
+    )
+  );
+}
+
+function fjm_ceacs_block($op = 'list', $delta = 0, $edit = array()) {
+  if (module_exists('csl')) {
+    module_load_include('inc', 'csl', 'CSL');
+    $blocks = array(
+      array(
+        'info' => t('Recent IR additions'),
+        'cache' => BLOCK_NO_CACHE,
+        'content_call' => array(
+          'func' => 'theme',
+          'params' => array('fjm_ceacs_recent_ir_list')
+        ),
+        'view' => array(
+          'subject' => t('Recent additions'),
+          //'content' => theme('islandora_fjm_recent_ir') //Using the 'content_call' bit to avoid the call during listing...
+        ),
+        'config' => array(
+          'csl_type' => array(
+            '#type' => 'select',
+            '#title' => t('CSL type'),
+            '#options' => CSL::getNames(),
+            '#description' => t('The CSL to use in the display'),
+            '#default_value' => variable_get('fjm_ceacs_recent_additions_csl', citeproc_default_style())
+          ),
+          'citation_number' => array(
+            '#type' => 'textfield',
+            '#title' => t('Number of recent docs'),
+            '#description' => t('The number of documents to show in the "Recent additions" block'),
+            '#default_value' => variable_get('fjm_ceacs_recent_additions_number', 5),
+            '#element_validate' => array('fjm_ceacs_validate_numeric_textfield')
+          )
+        ),
+        'save' => array(
+          'fjm_ceacs_recent_additions_csl' => !empty($edit)?
+            $edit['csl_type']:
+            citeproc_default_style(),
+          'fjm_ceacs_recent_additions_number' => !empty($edit)?
+            intval($edit['citation_number']):
+            5
+        )
+      )
+    );
+    
+    switch($op) {
+      case 'list':
+        return $blocks;
+      case 'view':
+        $block =& $blocks[$delta];
+        $call =& $block['content_call'];
+        $block['view']['content'] = call_user_func_array($call['func'], $call['params']);
+        return $blocks[$delta]['view'];
+      case 'configure':
+        return $blocks[$delta]['config'];
+      case 'save':
+        $block =& $blocks[$delta]['save'];
+        foreach($block as $var => $value) {
+          variable_set($var, $value);
+        }
+        break;
+      default:
+        return;
+    }
+  }
+}
+
+function fjm_ceacs_validate_numeric_textfield($element, &$form_state) {
+  if (!is_numeric($element['#value']) &&
+    !intval($element['#value']) > 0) {
+    form_error($element, t('Must be an integer greater than 0.'));
+  }
+}
+
+function template_preprocess_fjm_ceacs_recent_ir_list(&$vars) {
+  //Select all the recent docs... 
+  module_load_include('php', 'islandora_solr_search', 'SolrPhpClient/Apache/Solr/Service');
+  $solrUrl = variable_get('islandora_solr_search_block_url', 'http://localhost:8080/solr/');
+  $pathParts = parse_url($solrUrl);
+  $solr = new Apache_Solr_Service($pathParts['host'], $pathParts['port'], $pathParts['path']);
+  $solr->setCreateDocuments(FALSE);
+  try {
+    $results = $solr->search('*:*', 0, variable_get('fjm_ceacs_recent_additions_number', 3), array(
+      'qt' => variable_get('islandora_solr_search_block_request_handler', 'standard'),
+      'sort' => 'fgs_createdDate_dt desc',
+      'fl' => 'PID,mods_fullxml_store,mods_genre_endnote_ms'
+    ));
+    foreach($results->response->docs as &$doc) {
+      $vars['pids'][] = $doc->PID;
+    }
+    
+    module_load_include('inc', 'csl', 'CSL');
+    $csl = variable_get('fjm_ceacs_recent_additions_csl', NULL);
+    if (!empty($csl) && CSL::Exists($csl)) {
+      $vars['style'] = citeproc_style($csl);
+    }
+    else {
+      $vars['style'] = citeproc_default_style();
+    }
+    $vars['solr_docs'] = $results->response->docs;
+  }
+  catch (Exception $e) {
+    dsm($e);
+  }
+}
+
+function fjm_ceacs_map_genre($genre) {
+  static $mapping = array(
+    'Journal Article' => 'articulo',
+    'Book' => 'book',
+    'Book Section' => 'book',
+    'Edited Book' => 'book',
+    'Thesis' => 'thesis',
+    'Working Paper' => 'workingpaper' //@todo needs to be verified.
+  );
+  
+  $genre = is_array($genre)?$genre[0]:$genre;
+  
+  if (array_key_exists($genre, $mapping)) {
+    return $mapping[$genre];
+  }
+}
+
+function template_preprocess_fjm_ceacs_recent_ir_item(&$vars) {
+  $doc = $vars['solr_doc'];
+  $pid = $doc->PID;
+  
+  $vars['link'] = url("fedora/{$doc->PID}");
+
+  $vars['citation'] = scholar_citation_from_solr_doc($doc, $vars['style']);
+  $vars['type'] = $doc->mods_genre_marcgt_ms;
+}
+
+function fjm_ceacs_preprocess_fjm_ceacs_recent_ir_item(&$vars) {
+  $doc = $vars['solr_doc'];
+
+  $vars['type'] = fjm_ceacs_map_genre($doc->mods_genre_endnote_ms);
+  $vars['access'] = 'open';
+}
+
+function fjm_ceacs_preprocess_scholar_search_alt_item(&$vars) {
+  $doc = $vars['solr_doc'];
+  $title = (array)$doc->mods_title_mlt;
+  $pid = $doc->PID;
+  $vars['title'] = l(array_shift($title), "fedora/repository/$pid");
+  $vars['type'] = fjm_ceacs_map_genre($doc->mods_genre_endnote_ms);
+}
+
+
+/** Implementation of hook_form_alter()
+ *  Adds a couple columns which indicate the EndNote genre and the presence of a PDF datastream.
+ */
+function fjm_ceacs_form_scholar_search_results_form_alter(&$form, &$form_state) {  
+  $qp = $form_state['storage']['query'];
+  $docs = $qp->solrResult->response->docs;
+  foreach ($form['table']['rows'] as $index => &$row) {
+    $doc = $docs[$index];
+    $genre =& $doc->mods_genre_endnote_ms;
+    $doc_type = is_array($genre)?
+      $genre[0]:
+      $genre;
+    $type = fjm_ceacs_map_genre($doc_type);
+    $DSs = $doc->fedora_datastreams_ms;
+    
+    $new_row = array(
+      '#pid' => $row['#pid'],
+      'icon' => array('#value' => <<<EOT
+<div class="icon type-$type" title="$doc_type">&nbsp;</div>
+EOT
+      ),
+      'result' => $row['result'],
+      'pdf' => array('#value' => array_search('PDF', (array)$DSs) !== FALSE? <<<EOT
+<div class="icon has-pdf">&nbsp;</div>
+EOT
+:''
+      )
+    );
+    $row = $new_row;
+  }
+  
+  $head =& $form['table']['#header'];
+  
+  $form['table']['#caption'] = $head[1];  //Set the caption for the table.
+  
+  //And set the column titles, as we're moving them around anyway.
+  $head[1] = t('Type of Publication');
+  $head[2] = t('Bibliographical Citation');
+  $head[3] = t('PDF');
+}
+
+function template_preprocess_islandora_fjm_atomfeed(&$vars) {
+  module_load_include('php', 'islandora_solr_search', 'SolrPhpClient/Apache/Solr/Service');
+  $solrUrl = variable_get('islandora_solr_search_block_url', 'http://localhost:8080/solr/');
+  $pathParts = parse_url($solrUrl);
+  $solr = new Apache_Solr_Service($pathParts['host'], $pathParts['port'], $pathParts['path']);
+  $solr->setCreateDocuments(FALSE);
+
+  try {
+    $results = $solr->search($vars['query'], 0, min($vars['number'], 100), array(
+      'sort' => $vars['sort'],
+      'fl' => '*',
+      'fq' => 'rels_hasModel_uri_ms:"info:fedora/ir:citationCModel"' //XXX:  Should be generalized/made configurable so that this might be pulled into the main islandora.
+    ));
+    
+    $vars['updated'] = date('c');
+    
+    $vars['solr_docs'] = $results->response->docs;
+    $vars['entries'] = array();
+    foreach($vars['solr_docs'] as &$doc) {
+      $vars['entries'][] = theme('islandora_fjm_atomentry', $doc, $vars['style']);
+    }
+    $s = array(
+        $vars['query'],
+        $vars['number'],
+        $vars['style'],
+        $vars['sort']
+    );
+    $feed_url = 'islandora/atomfeed';
+    foreach ($s as $val) {
+      if (!empty($val)) {
+        $feed_url .= "/$val";
+      }
+      else {
+        break;
+      }
+    }
+    $vars['id'] = $vars['link'] = url($feed_url, array(
+      'absolute' => TRUE));
+      
+    $vars['title'] = variable_get('fedora_repository_title', 'Fedora Items');
+  }
+  catch (Exception $e) {
+    dsm($e);
+  }
+}
+
+function template_preprocess_islandora_fjm_atomentry(&$vars) {
+  $doc =& $vars['solr_doc'];
+  
+  //FIXME:  The ID should be changed to reflect a real handle...
+  $vars['id'] = $vars['link'] = url('fedora/repository/'. $doc->PID, array(
+    'absolute' => TRUE
+  ));
+  $vars['title'] = $doc->mods_title_mlt;
+  $vars['published'] = $doc->mods_dateIssued_dt;
+  $vars['updated'] = $doc->fgs_lastModifiedDate_dt;
+  
+  $vars['authors'] = (array)$doc->mods_rname_author_ms;
+  $vars['contributors'] = array_diff((array)$doc->mods_rname_associated_ms, 
+    (array)$doc->mods_rname_author_ms
+  );
+}
+
+/* html_convert_entities($string) -- convert named HTML entities to
+* XML-compatible numeric entities.
+*
+* Thanks to Matt Robinson for making this code available: http://inanimatt.com/php-convert-entities.html
+*/
+function _fjm_ceacs_convert_entities($string) {
+  return preg_replace_callback('/&([a-zA-Z][a-zA-Z0-9]+);/',
+                               '_islandora_fjm_convert_entity', $string);
+}
+
+/* Swap HTML named entity with its numeric equivalent. If the entity
+* isn't in the lookup table, this function returns a blank, which
+* destroys the character in the output - this is probably the
+* desired behaviour when producing XML.
+*
+* Thanks to Matt Robinson for making this code available: http://inanimatt.com/php-convert-entities.html
+*/
+function _fjm_ceacs_convert_entity($matches) {
+  static $table = array('quot' => '&#34;',
+                        'amp' => '&#38;',
+                        'lt' => '&#60;',
+                        'gt' => '&#62;',
+                        'OElig' => '&#338;',
+                        'oelig' => '&#339;',
+                        'Scaron' => '&#352;',
+                        'scaron' => '&#353;',
+                        'Yuml' => '&#376;',
+                        'circ' => '&#710;',
+                        'tilde' => '&#732;',
+                        'ensp' => '&#8194;',
+                        'emsp' => '&#8195;',
+                        'thinsp' => '&#8201;',
+                        'zwnj' => '&#8204;',
+                        'zwj' => '&#8205;',
+                        'lrm' => '&#8206;',
+                        'rlm' => '&#8207;',
+                        'ndash' => '&#8211;',
+                        'mdash' => '&#8212;',
+                        'lsquo' => '&#8216;',
+                        'rsquo' => '&#8217;',
+                        'sbquo' => '&#8218;',
+                        'ldquo' => '&#8220;',
+                        'rdquo' => '&#8221;',
+                        'bdquo' => '&#8222;',
+                        'dagger' => '&#8224;',
+                        'Dagger' => '&#8225;',
+                        'permil' => '&#8240;',
+                        'lsaquo' => '&#8249;',
+                        'rsaquo' => '&#8250;',
+                        'euro' => '&#8364;',
+                        'fnof' => '&#402;',
+                        'Alpha' => '&#913;',
+                        'Beta' => '&#914;',
+                        'Gamma' => '&#915;',
+                        'Delta' => '&#916;',
+                        'Epsilon' => '&#917;',
+                        'Zeta' => '&#918;',
+                        'Eta' => '&#919;',
+                        'Theta' => '&#920;',
+                        'Iota' => '&#921;',
+                        'Kappa' => '&#922;',
+                        'Lambda' => '&#923;',
+                        'Mu' => '&#924;',
+                        'Nu' => '&#925;',
+                        'Xi' => '&#926;',
+                        'Omicron' => '&#927;',
+                        'Pi' => '&#928;',
+                        'Rho' => '&#929;',
+                        'Sigma' => '&#931;',
+                        'Tau' => '&#932;',
+                        'Upsilon' => '&#933;',
+                        'Phi' => '&#934;',
+                        'Chi' => '&#935;',
+                        'Psi' => '&#936;',
+                        'Omega' => '&#937;',
+                        'alpha' => '&#945;',
+                        'beta' => '&#946;',
+                        'gamma' => '&#947;',
+                        'delta' => '&#948;',
+                        'epsilon' => '&#949;',
+                        'zeta' => '&#950;',
+                        'eta' => '&#951;',
+                        'theta' => '&#952;',
+                        'iota' => '&#953;',
+                        'kappa' => '&#954;',
+                        'lambda' => '&#955;',
+                        'mu' => '&#956;',
+                        'nu' => '&#957;',
+                        'xi' => '&#958;',
+                        'omicron' => '&#959;',
+                        'pi' => '&#960;',
+                        'rho' => '&#961;',
+                        'sigmaf' => '&#962;',
+                        'sigma' => '&#963;',
+                        'tau' => '&#964;',
+                        'upsilon' => '&#965;',
+                        'phi' => '&#966;',
+                        'chi' => '&#967;',
+                        'psi' => '&#968;',
+                        'omega' => '&#969;',
+                        'thetasym' => '&#977;',
+                        'upsih' => '&#978;',
+                        'piv' => '&#982;',
+                        'bull' => '&#8226;',
+                        'hellip' => '&#8230;',
+                        'prime' => '&#8242;',
+                        'Prime' => '&#8243;',
+                        'oline' => '&#8254;',
+                        'frasl' => '&#8260;',
+                        'weierp' => '&#8472;',
+                        'image' => '&#8465;',
+                        'real' => '&#8476;',
+                        'trade' => '&#8482;',
+                        'alefsym' => '&#8501;',
+                        'larr' => '&#8592;',
+                        'uarr' => '&#8593;',
+                        'rarr' => '&#8594;',
+                        'darr' => '&#8595;',
+                        'harr' => '&#8596;',
+                        'crarr' => '&#8629;',
+                        'lArr' => '&#8656;',
+                        'uArr' => '&#8657;',
+                        'rArr' => '&#8658;',
+                        'dArr' => '&#8659;',
+                        'hArr' => '&#8660;',
+                        'forall' => '&#8704;',
+                        'part' => '&#8706;',
+                        'exist' => '&#8707;',
+                        'empty' => '&#8709;',
+                        'nabla' => '&#8711;',
+                        'isin' => '&#8712;',
+                        'notin' => '&#8713;',
+                        'ni' => '&#8715;',
+                        'prod' => '&#8719;',
+                        'sum' => '&#8721;',
+                        'minus' => '&#8722;',
+                        'lowast' => '&#8727;',
+                        'radic' => '&#8730;',
+                        'prop' => '&#8733;',
+                        'infin' => '&#8734;',
+                        'ang' => '&#8736;',
+                        'and' => '&#8743;',
+                        'or' => '&#8744;',
+                        'cap' => '&#8745;',
+                        'cup' => '&#8746;',
+                        'int' => '&#8747;',
+                        'there4' => '&#8756;',
+                        'sim' => '&#8764;',
+                        'cong' => '&#8773;',
+                        'asymp' => '&#8776;',
+                        'ne' => '&#8800;',
+                        'equiv' => '&#8801;',
+                        'le' => '&#8804;',
+                        'ge' => '&#8805;',
+                        'sub' => '&#8834;',
+                        'sup' => '&#8835;',
+                        'nsub' => '&#8836;',
+                        'sube' => '&#8838;',
+                        'supe' => '&#8839;',
+                        'oplus' => '&#8853;',
+                        'otimes' => '&#8855;',
+                        'perp' => '&#8869;',
+                        'sdot' => '&#8901;',
+                        'lceil' => '&#8968;',
+                        'rceil' => '&#8969;',
+                        'lfloor' => '&#8970;',
+                        'rfloor' => '&#8971;',
+                        'lang' => '&#9001;',
+                        'rang' => '&#9002;',
+                        'loz' => '&#9674;',
+                        'spades' => '&#9824;',
+                        'clubs' => '&#9827;',
+                        'hearts' => '&#9829;',
+                        'diams' => '&#9830;',
+                        'nbsp' => '&#160;',
+                        'iexcl' => '&#161;',
+                        'cent' => '&#162;',
+                        'pound' => '&#163;',
+                        'curren' => '&#164;',
+                        'yen' => '&#165;',
+                        'brvbar' => '&#166;',
+                        'sect' => '&#167;',
+                        'uml' => '&#168;',
+                        'copy' => '&#169;',
+                        'ordf' => '&#170;',
+                        'laquo' => '&#171;',
+                        'not' => '&#172;',
+                        'shy' => '&#173;',
+                        'reg' => '&#174;',
+                        'macr' => '&#175;',
+                        'deg' => '&#176;',
+                        'plusmn' => '&#177;',
+                        'sup2' => '&#178;',
+                        'sup3' => '&#179;',
+                        'acute' => '&#180;',
+                        'micro' => '&#181;',
+                        'para' => '&#182;',
+                        'middot' => '&#183;',
+                        'cedil' => '&#184;',
+                        'sup1' => '&#185;',
+                        'ordm' => '&#186;',
+                        'raquo' => '&#187;',
+                        'frac14' => '&#188;',
+                        'frac12' => '&#189;',
+                        'frac34' => '&#190;',
+                        'iquest' => '&#191;',
+                        'Agrave' => '&#192;',
+                        'Aacute' => '&#193;',
+                        'Acirc' => '&#194;',
+                        'Atilde' => '&#195;',
+                        'Auml' => '&#196;',
+                        'Aring' => '&#197;',
+                        'AElig' => '&#198;',
+                        'Ccedil' => '&#199;',
+                        'Egrave' => '&#200;',
+                        'Eacute' => '&#201;',
+                        'Ecirc' => '&#202;',
+                        'Euml' => '&#203;',
+                        'Igrave' => '&#204;',
+                        'Iacute' => '&#205;',
+                        'Icirc' => '&#206;',
+                        'Iuml' => '&#207;',
+                        'ETH' => '&#208;',
+                        'Ntilde' => '&#209;',
+                        'Ograve' => '&#210;',
+                        'Oacute' => '&#211;',
+                        'Ocirc' => '&#212;',
+                        'Otilde' => '&#213;',
+                        'Ouml' => '&#214;',
+                        'times' => '&#215;',
+                        'Oslash' => '&#216;',
+                        'Ugrave' => '&#217;',
+                        'Uacute' => '&#218;',
+                        'Ucirc' => '&#219;',
+                        'Uuml' => '&#220;',
+                        'Yacute' => '&#221;',
+                        'THORN' => '&#222;',
+                        'szlig' => '&#223;',
+                        'agrave' => '&#224;',
+                        'aacute' => '&#225;',
+                        'acirc' => '&#226;',
+                        'atilde' => '&#227;',
+                        'auml' => '&#228;',
+                        'aring' => '&#229;',
+                        'aelig' => '&#230;',
+                        'ccedil' => '&#231;',
+                        'egrave' => '&#232;',
+                        'eacute' => '&#233;',
+                        'ecirc' => '&#234;',
+                        'euml' => '&#235;',
+                        'igrave' => '&#236;',
+                        'iacute' => '&#237;',
+                        'icirc' => '&#238;',
+                        'iuml' => '&#239;',
+                        'eth' => '&#240;',
+                        'ntilde' => '&#241;',
+                        'ograve' => '&#242;',
+                        'oacute' => '&#243;',
+                        'ocirc' => '&#244;',
+                        'otilde' => '&#245;',
+                        'ouml' => '&#246;',
+                        'divide' => '&#247;',
+                        'oslash' => '&#248;',
+                        'ugrave' => '&#249;',
+                        'uacute' => '&#250;',
+                        'ucirc' => '&#251;',
+                        'uuml' => '&#252;',
+                        'yacute' => '&#253;',
+                        'thorn' => '&#254;',
+                        'yuml' => '&#255;'
+
+                        );
+  // Entity not found? Destroy it.
+  return isset($table[$matches[1]]) ? $table[$matches[1]] : '';
+}
+
+function fjm_ceacs_preprocess_islandora_fjm_atomentry(&$vars) {
+  //Take a Solr query, and call theme on each doc returned.
+  $doc =& $vars['solr_doc'];
+  $style = citeproc_style($vars['style']);
+  $vars['content'] = _islandora_fjm_convert_entities(scholar_citation_from_solr_doc($doc, $style === FALSE? 
+      variable_get('islandora_fjm_recent_additions_csl', NULL):
+      $style,
+    'mods_fullxml_store',
+    'php'));
+  //dd($vars);
+}
+
+function _theme_table_improved_rows($rows, $cell_type) {
+  $output = '';
+  foreach ($rows as $row) {
+    $row_attr = array();
+    $row_data = array();
+    if (array_key_exists('data', $row)) {
+      $row_attr = $row['attributes']; //Might not exist...  Should be null?
+      $row_data = $row['data'];
+    }
+    else {
+      $row_data = $row;
+    }
+      
+    $output .= '<tr '. drupal_attributes($row_attr) .'>';
+    foreach ($row_data as $cell) {
+      $cell_attr = array();
+      $cell_data = array();
+      if (array_key_exists('data', (array)$cell)) {
+        $cell_attr = $cell['attributes']; //Might not exist...  Should be null?
+        $cell_data = $cell['data'];
+      }
+      else {
+        $cell_data = $cell;
+      }
+      $output .= "<$cell_type ". drupal_attributes($cell_attr) .">$cell_data</$cell_type>";
+    }
+    $output .= '</tr>';
+  }
+  return $output;
+}
+
+function _theme_table_section($rows, $type='body') {
+  $attributes = array();
+  $data = array();
+  if (array_key_exists('data', $rows)) {
+    $attributes = $rows['attributes']; //Might not exist...  Should be null?
+    $data = $rows['data'];
+  }
+  else {
+    $data = $rows;
+  }
+  
+  $cell_types = array(
+    'body' => 'td',
+    'head' => 'th',
+    'foot' => 'th'
+  );
+  
+  $cell_type = $cell_types[$type];
+  
+  $output = "<t$type ". drupal_attributes($attributes) .'>';
+  $output .= _theme_table_improved_rows($data, $cell_type);
+  $output .= "</t$type>";
+  return $output;
+}
+
+function theme_table_improved($headers, $body, $footers, $caption=NULL, $attributes=array()) {
+  $output = '<table '. drupal_attributes($attributes) .'>';
+  if (!is_null($caption)) {
+    $cap_data = '';
+    $cap_attr = array();
+    if (array_key_exists('data', (array)$caption)) {
+      $cap_data = $caption['data'];
+      $cap_attr = $caption['attributes'];
+    }
+    else {
+      $cap_data = $caption;
+    }
+    $output .= "<caption ". drupal_attributes($cap_attr) .">$cap_data</caption>";
+  }
+  
+  //Apparently, casting is more efficient than function calls...
+  $headers = (array)$headers;
+  $body = (array)$body;
+  $footers = (array)$footers;
+  
+  if (count($headers) > 0) {
+    $output .= _theme_table_section($headers, 'head');
+  }
+  if (count($footers) > 0) {
+    $output .= _theme_table_section($footers, 'foot');
+  }
+  if (count($body) > 0) {
+    $output .= _theme_table_section($body, 'body');
+  }
+  $output .= '</table>';
+  return $output;
+}
+
+function theme_fjm_ceacs_az($type, $letter_in) {
+  if (empty($type) || strcasecmp($type, 'all') === 0) {
+    $type = 'authors';
+  }
+  else {
+    $type = 'members';
+  }
+  $outputArray = array(
+    array(
+      'data' => l(t('ALL'), $type),
+      'class' => strcasecmp('all', $letter_in) === 0?
+          'selected':
+          ''
+    )
+  );
+  foreach (range('A', 'Z') as $letter) {
+      $outputArray[] = array(
+        'data' => l($letter, "$type/$letter"),
+        'class' => strcasecmp($letter, $letter_in) === 0?
+          'selected':
+          ''
+      );
+  }
+  return theme('item_list', $outputArray, '', 'ul', array('class' => 'ceacs-az-list'));
+}
+
+function theme_fjm_ceacs_authors($type='all', $letter=NULL) {
+    if (empty($type)) {
+      $type = 'all';
+    }
+    $fq = array('rels_hasModel_uri_ms:"info:fedora/ir:authorityCModel"');
+    if (strcasecmp($type, 'CEACS') === 0) {
+      $fq[] = 'eaccpf_ceacs_member_b:true';
+    }
+    
+    if (empty($letter)) {
+      $letter = t('ALL');
+    }
+    
+    if (strcasecmp($letter, t('ALL')) !== 0) {
+      $letter = strtoupper($letter);
+      $fq[] = "eaccpf_name_complete_es:$letter*";
+    }
+    
+    //Perform the search
+    module_load_include('php', 'islandora_solr_search', 'SolrPhpClient/Apache/Solr/Service');
+    $solrUrl = variable_get('islandora_solr_search_block_url', 'http://localhost:8080/solr/');
+    $pathParts = parse_url($solrUrl);
+    $solr = new Apache_Solr_Service($pathParts['host'], $pathParts['port'], $pathParts['path']);
+    $solr->setCreateDocuments(FALSE);
+    $results = $solr->search('*:*', 0, 10000, array(
+      'sort' => 'eaccpf_name_complete_mlt asc',
+      'fl' => '*,score',
+      'fq' => implode(' ', $fq)
+    ));
+    
+    $header = array();
+    $rows = array();
+    if (strcasecmp($type, 'CEACS') === 0) {
+      $header = array(
+        t('Image'),
+        t('Name'),
+        t('CEACS role'),
+        t('Publications'),
+        t('Academic page')
+      );
+      $rows = array();
+      //Process the results into rows...
+      foreach($results->response->docs as $doc) {
+        //dsm($doc);
+        $rows[] = array(
+          !empty($doc->eaccpf_thumbnail_object_s)?
+            "<img src='". url("fedora/repository/{$doc->eaccpf_thumbnail_object_s}/TN") ."'></img>":
+            '',//"<img src='". url("fedora/repository/atm:defaultPersonImage/TN") ."'></img>", //FIXME:  Needs a default image
+          $doc->eaccpf_name_complete_es,
+          $doc->eaccpf_ceacs_role_s,
+          l(t('Publications'), "islandora/solr/search/mods_rname_associated_mt:({$doc->eaccpf_name_complete_es})"),
+          (!empty($doc->eaccpf_academic_page_s))?
+              l(t('Academic page'), $doc->eaccpf_academic_page_s):
+              ''
+        );
+      }
+    }
+    else {
+      $header = array(
+        t('Name'),
+        t('Publications'),
+        //t('Academic page')
+      );
+      $rows = array();
+      //Process the results into rows...
+      foreach($results->response->docs as $doc) {
+        //dsm($doc);
+        $rows[] = array(
+          //!empty($doc->eaccpf_thumbnail_object_s)?
+          //  "<img src='". url("fedora/repository/{$doc->eaccpf_thumbnail_object_s}/TN") ."'></img>":
+          //  '', //"<img src='". url("fedora/repository/atm:defaultPersonImage/TN") ."'></img>", //FIXME: Needs a default image    
+          $doc->eaccpf_name_complete_es,
+          l(t('Publications'), "islandora/solr/search/mods_rname_associated_mt:({$doc->eaccpf_name_complete_es})"),
+          //(!empty($doc->eaccpf_academic_page_s))?
+          //    l(t('Academic page'), $doc->eaccpf_academic_page_s):
+              ''
+        );
+      }
+    }
+    
+    //The A-Z display
+    $az = array( //tr
+      array( //td
+        'data' => theme('islandora_fjm_ceacs_az', $type, $letter),
+        'attributes' => array('colspan' => count($header))
+      )
+    );
+    
+    //Return the table with the A-Z dealios.
+    return theme('table_improved',
+      array(  //header
+        $az,
+        $header
+      ),
+      $rows,  //body
+      array(  //footer
+        $az
+      ),
+      t('Authors - Listing %letter', 
+        array(
+          //'!title' => drupal_get_title(), //Use the page title, for now...
+          '%letter' => $letter)),
+      array(
+        'class' => 'ceacs-authors'
+      )
+    );
+}
